@@ -1,8 +1,9 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
 import { build } from 'esbuild';
 
 process.chdir(fileURLToPath(new URL('..', import.meta.url)));
@@ -20,6 +21,7 @@ if (!prebuilt) {
   if (cargo.status !== 0) process.exit(cargo.status ?? 1);
 }
 const wasm = resolve(prebuilt || 'compiler/target/wasm32-unknown-unknown/release/puddi_ide_compiler.wasm');
+const compiler = await readFile(wasm);
 
 await rm('dist', { recursive: true, force: true });
 await mkdir('dist');
@@ -40,10 +42,12 @@ await Promise.all([
   cp('web/index.html', 'dist/index.html'),
   cp('web/styles.css', 'dist/styles.css'),
   cp('web/compiler-worker.js', 'dist/compiler-worker.js'),
+  cp('web/runtime-worker.js', 'dist/runtime-worker.js'),
   cp('compiler/upstream/src/runtime.mjs', 'dist/puddi-runtime.mjs'),
   cp('LICENSE-APACHE', 'dist/LICENSE-APACHE'),
   cp('LICENSE-MIT', 'dist/LICENSE-MIT'),
-  cp(wasm, 'dist/compiler.wasm'),
+  writeFile('dist/compiler.wasm', compiler),
+  writeFile('dist/compiler.wasm.gz', gzipSync(compiler, { level: 9 })),
   writeFile('dist/.nojekyll', ''),
   writeFile('dist/preview.html', `<!doctype html>
 <html lang="en">

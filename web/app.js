@@ -38,6 +38,7 @@ let saveTimer;
 let revision = 0;
 let diagnostics = [];
 let worker;
+let engine = { state: 'loading' };
 let pending;
 let sequence = 0;
 let download;
@@ -386,8 +387,16 @@ function getWorker() {
     if (pending) fail(event.message || 'The compiler could not start');
     worker?.terminate();
     worker = undefined;
+    engine = { state: 'offline' };
   });
   return worker;
+}
+
+function engineStatus() {
+  if (engine.state === 'ready') return 'Compiler ready';
+  if (engine.state === 'starting') return 'Starting compiler';
+  if (engine.state === 'offline') return 'Compiler will retry on demand';
+  return engine.percent ? `Downloading compiler ${engine.percent}%` : 'Loading compiler';
 }
 
 function busy(value) {
@@ -401,6 +410,14 @@ function finish() {
   busy(false);
 }
 
+function limitOperation() {
+  clearTimeout(pending.timeout);
+  pending.timeout = setTimeout(() => {
+    stop(false);
+    fail('The operation exceeded the 30 second time limit');
+  }, 30_000);
+}
+
 function fail(message) {
   finish();
   setStatus('Execution failed', 'error');
@@ -410,8 +427,14 @@ function fail(message) {
 
 function stop(report = true) {
   if (!pending && !previewRun) return;
-  worker?.terminate();
-  worker = undefined;
+  if (pending?.phase === 'compiling') {
+    // A synchronous Wasm compilation cannot be interrupted by a message.
+    worker?.terminate();
+    worker = undefined;
+    engine = { state: 'loading' };
+  } else if (pending) {
+    worker?.postMessage({ action: 'cancel', id: pending.id });
+  }
   resetPreview();
   finish();
   if (report) {
@@ -442,14 +465,10 @@ function runAction(action) {
   const preview = action === 'run' && files.some(file => /^\s*import\s+std\.dom(?=[\s.;{]|$)/m.test(file.text));
   const id = ++sequence;
   pending = {
-    id, action, revision, preview, name: project().current,
-    timeout: setTimeout(() => {
-      stop(false);
-      fail('The operation exceeded the 30 second time limit');
-    }, 30_000),
+    id, action, revision, preview, name: project().current, phase: 'loading',
   };
   busy(true);
-  setStatus(action === 'format' ? 'Formatting' : action === 'check' ? 'Checking' : 'Compiling');
+  setStatus(engine.state === 'offline' ? 'Loading compiler' : engineStatus());
   try {
     getWorker().postMessage({ id, action, files, preview });
   } catch (error) {
@@ -475,8 +494,21 @@ async function openPreview(id, wasm) {
 }
 
 function receive(data) {
+  if (data.kind === 'engine') {
+    engine = data;
+    if (pending?.phase === 'loading' || (!pending && el('run-status').dataset.phase === 'warmup')) {
+      setStatus(engineStatus());
+      if (data.state === 'ready' || data.state === 'offline') delete el('run-status').dataset.phase;
+    }
+    return;
+  }
   if (pending?.id !== data.id && previewRun?.id !== data.id) return;
   switch (data.kind) {
+    case 'phase':
+      pending.phase = data.phase;
+      limitOperation();
+      setStatus(pending.action === 'format' ? 'Formatting' : pending.action === 'check' ? 'Checking' : 'Compiling');
+      break;
     case 'failure':
       fail(data.message);
       break;
@@ -504,6 +536,8 @@ function receive(data) {
       break;
     }
     case 'compiled':
+      pending.phase = 'running';
+      limitOperation();
       if (pending.revision === revision) {
         diagnostics = data.diagnostics;
         renderDiagnostics();
@@ -633,3 +667,14 @@ el('editor-file').textContent = project().current;
 renderFiles();
 renderExamples();
 updateCursor();
+
+// Prepare the compiler while the visitor reads or edits the source.
+try {
+  el('run-status').dataset.phase = 'warmup';
+  setStatus(engineStatus());
+  getWorker().postMessage({ action: 'warmup' });
+} catch {
+  engine = { state: 'offline' };
+  delete el('run-status').dataset.phase;
+  setStatus(engineStatus());
+}
