@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
   <meta name="theme-color" content="#131519">
   <meta name="description" content="Write, check and run Puddi in your browser">
   <title>Puddi IDE</title>
@@ -23,6 +23,8 @@
 <body>
   <header class="topbar">
     <div class="brand">
+      <button id="toggle-sidebar" class="icon-button" type="button" aria-label="Workspace" aria-controls="sidebar"
+        aria-expanded="true" title="Toggle workspace"><span aria-hidden="true" class="icon-menu"></span></button>
       <span class="brand-mark" aria-hidden="true">p</span>
       <h1>Puddi <span>IDE</span></h1>
       <span class="version">v0.1.0</span>
@@ -36,25 +38,28 @@
   <main class="workbench">
     <aside class="sidebar" id="sidebar" aria-label="Workspace and examples">
       <div class="sidebar-header">
-        <h2>Workspace</h2>
+        <h2>Files <span id="file-count"></span></h2>
         <button id="open-file" class="icon-button" aria-label="Import Puddi files" title="Import Puddi files">
           <span class="icon-import" aria-hidden="true"></span>
         </button>
-        <button id="new-file" class="icon-button" aria-label="New file" title="New file">
+        <button id="new-file" class="icon-button" aria-label="New file" title="New file" aria-controls="new-file-form" aria-expanded="false">
           <span class="icon-plus" aria-hidden="true"></span>
         </button>
       </div>
       <input id="file-input" type="file" accept=".pud" multiple hidden>
       <form id="new-file-form" hidden>
         <label class="sr-only" for="file-name">File name</label>
-        <input id="file-name" type="text" placeholder="module.pud" maxlength="120" spellcheck="false" required>
+        <input id="file-name" type="text" placeholder="module.pud" maxlength="120" spellcheck="false" aria-describedby="file-error" required>
         <button type="submit">Add</button>
         <p id="file-error" role="alert" hidden></p>
       </form>
-      <ul class="files" id="files" aria-label="Workspace files"></ul>
-      <div class="sidebar-group">
-        <h2>Examples</h2>
-        <ul id="examples" class="example-list"></ul>
+      <p id="workspace-feedback" role="status" hidden></p>
+      <div class="sidebar-scroll">
+        <ul class="files" id="files" aria-label="Workspace files"></ul>
+        <div class="sidebar-group">
+          <h2>Projects</h2>
+          <ul id="examples" class="example-list"></ul>
+        </div>
       </div>
       <div class="sidebar-footer">
         <span class="local-dot" aria-hidden="true"></span>
@@ -65,19 +70,25 @@
     <div class="surface">
       <div class="toolbar">
         <div class="toolbar-context">
-          <button id="toggle-sidebar" class="icon-button" aria-label="Toggle workspace" aria-controls="sidebar"
-            aria-expanded="true" hidden><span aria-hidden="true" class="icon-menu"></span></button>
           <span id="project-name">My workspace</span>
+          <div class="mobile-switch" role="group" aria-label="Workbench view">
+            <button id="view-editor" class="tool-action" type="button" aria-controls="editor-pane" aria-pressed="true">Editor</button>
+            <button id="view-results" class="tool-action" type="button" aria-controls="results-pane" aria-pressed="false">Results <span id="mobile-problem-count" hidden></span></button>
+          </div>
         </div>
         <div class="toolbar-actions">
-          <button class="tool-action" id="format" type="button" title="Format the current file">Format</button>
-          <button class="tool-action" id="check" type="button" title="Check types">Check</button>
-          <button class="primary" id="run" type="button"><span class="play-icon" aria-hidden="true"></span>Run</button>
-          <button class="tool-action stop" id="stop" type="button" hidden>Stop</button>
+          <button class="tool-action" id="format" type="button">Format</button>
+          <button class="tool-action" id="check" type="button">Check</button>
+          <div class="run-action">
+            <button class="primary" id="run" type="button"><span class="play-icon" aria-hidden="true"></span>Run <kbd aria-hidden="true" id="run-key"></kbd></button>
+            <button class="primary stop" id="stop" type="button" title="Stop the current operation"><span class="stop-icon" aria-hidden="true"></span>Stop</button>
+          </div>
+          <button id="toggle-results" class="icon-button" type="button" aria-label="Results" aria-controls="results-pane"
+            aria-expanded="true" title="Toggle results"><span class="icon-panel" aria-hidden="true"></span></button>
         </div>
       </div>
-      <div class="panes">
-        <section class="editor-pane" aria-label="Source editor">
+      <div class="panes" id="panes" data-view="editor">
+        <section class="editor-pane" id="editor-pane" aria-label="Source editor">
           <div class="pane-title">
             <span class="file-badge" aria-hidden="true">P</span>
             <span id="editor-file">main.pud</span>
@@ -86,13 +97,16 @@
           </div>
           <div id="editor"></div>
           <div class="editor-status">
+            <span id="editor-feedback" role="status"></span>
+            <button id="wrap" type="button" class="text-button" aria-pressed="false" title="Toggle line wrapping">Wrap</button>
             <span id="cursor">Ln 1, Col 1</span>
-            <span>UTF-8</span>
-            <span>Puddi</span>
           </div>
         </section>
 
-        <section class="results-pane" aria-label="Program results">
+        <div id="pane-divider" role="separator" tabindex="0" aria-label="Editor width" aria-orientation="vertical"
+          aria-controls="editor-pane" aria-valuemin="0" aria-valuemax="100" aria-valuenow="62"></div>
+
+        <section class="results-pane" id="results-pane" aria-label="Program results">
           <div class="panel-toolbar">
             <div class="panel-tabs" role="tablist" aria-label="Result views">
               <button type="button" id="tab-console" role="tab" aria-controls="console" aria-selected="true">Console</button>
@@ -101,7 +115,7 @@
               </button>
               <button type="button" id="tab-preview" role="tab" aria-controls="preview" aria-selected="false" tabindex="-1">Preview</button>
             </div>
-            <button class="icon-button" id="clear" aria-label="Clear console" title="Clear console">
+            <button class="icon-button" id="clear" aria-label="Clear console" title="Clear console" disabled>
               <span aria-hidden="true" class="icon-clear"></span>
             </button>
           </div>
@@ -109,14 +123,16 @@
             <div id="console-empty" class="empty-state">
               <span class="terminal-icon" aria-hidden="true">&gt;_</span>
               <p>Ready to run</p>
-              <span>Program output will appear here</span>
+              <span id="console-hint">Run the program to see its output</span>
             </div>
             <div id="output" role="log" aria-live="polite"></div>
+            <p id="output-limit" class="output-limit" hidden>More output was omitted</p>
           </div>
           <div id="problems" class="result-panel problems" role="tabpanel" aria-labelledby="tab-problems" tabindex="0" hidden>
             <div id="problems-empty" class="empty-state">
               <span class="terminal-icon" aria-hidden="true">✓</span>
-              <p>No problems</p>
+              <p id="problems-title">Source unchecked</p>
+              <span id="problems-hint">Run or check the program to see diagnostics</span>
             </div>
             <ul id="diagnostics"></ul>
           </div>
@@ -129,12 +145,14 @@
             <iframe id="preview-frame" title="Puddi program preview" sandbox="allow-scripts"
               referrerpolicy="no-referrer" hidden></iframe>
           </div>
-          <div class="result-status">
-            <span id="run-status" role="status">Browser target</span>
-            <button type="button" id="download-wasm" class="text-button" hidden>Download Wasm</button>
-          </div>
         </section>
       </div>
+      <footer class="result-status" aria-label="Workbench status">
+        <span id="run-status" role="status">Ready to run</span>
+        <span id="output-freshness" data-kind="stale" hidden>Previous source output</span>
+        <button type="button" id="download-wasm" class="text-button" hidden>Download Wasm</button>
+        <span id="compiler-status" title="Browser target">Loading compiler</span>
+      </footer>
     </div>
   </main>
 

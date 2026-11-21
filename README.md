@@ -4,6 +4,8 @@
 
 Write, check, format and run Puddi in a browser with WebAssembly GC support. The editor supports multiple modules, clickable compiler diagnostics, console output and an isolated preview for programs that use `std.dom`. Workspaces and edited examples are saved in this browser. Source files can be imported or downloaded, and successful runs make the generated core Wasm module available for download.
 
+Drag the divider or use its arrow keys to resize the results pane on wide screens. The workspace sidebar, results panel and line wrapping preferences are saved in this browser. On narrow screens, switch between Editor and Results in the toolbar. Selecting a diagnostic opens its source file and jumps to the reported location.
+
 The browser uses the real Puddi v0.1.0 toolchain, pinned as a Git submodule and compiled to WebAssembly. Format uses a small standalone build of the upstream formatter. On the first visit, the published IDE downloads the compressed compiler from jsDelivr or one of its mirrors, checks its SHA-256 digest and saves the verified Wasm in the browser's origin private file system (OPFS). Later visits load that file into the compiler worker. Browsers that block OPFS can use the compiler for the current tab. The console and preview runners load with the IDE, and repeat actions on unchanged files can reuse the most recent result.
 
 Browsers configured for Simplified Chinese (`zh-CN`, `zh-Hans` or `zh-Hans-CN`) try [JSDMirror](https://cdn.jsdmirror.com/) and [渺软公益 CDN](https://cdn.onmicrosoft.cn/) before jsDelivr. Other browsers try jsDelivr first. A timed-out download or a failed integrity check automatically advances to the next source.
@@ -14,6 +16,7 @@ The JavaScript runtime comes from the same compiler revision. The IDE targets th
 |---|---|
 | Ctrl or Command + Enter | Run |
 | Ctrl or Command + Shift + Enter | Check |
+| Ctrl or Command + Shift + F | Format current file |
 
 ## Build
 

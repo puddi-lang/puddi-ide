@@ -1,5 +1,5 @@
 import { basicSetup } from 'codemirror';
-import { EditorState } from '@codemirror/state';
+import { Compartment, EditorState } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
 import { HighlightStyle, StreamLanguage, syntaxHighlighting } from '@codemirror/language';
 import { setDiagnostics } from '@codemirror/lint';
@@ -9,6 +9,7 @@ import { formatSource } from './formatter.js';
 
 const el = id => document.getElementById(id);
 const storageKey = 'puddi-ide/v1';
+const layoutKey = 'puddi-ide/layout/v1';
 const maxSource = 512 * 1024;
 const maxFiles = 32;
 const validName = name => /^(?:[a-zA-Z_]\w*\/)*[a-zA-Z_]\w*\.pud$/.test(name);
@@ -32,12 +33,29 @@ try {
   // A corrupt or unavailable local store does not prevent editing.
 }
 
+let savedLayout;
+try { savedLayout = JSON.parse(localStorage.getItem(layoutKey)); } catch {}
+const layout = {
+  sidebar: savedLayout?.sidebar !== false,
+  results: savedLayout?.results !== false,
+  share: Number.isFinite(savedLayout?.share) ? Math.max(0, Math.min(100, savedLayout.share)) : 62,
+  wrap: savedLayout?.wrap === true,
+};
+const mobile = matchMedia('(max-width: 680px)');
+let mobileSidebar = false;
+
+function saveLayout() {
+  try { localStorage.setItem(layoutKey, JSON.stringify(layout)); } catch {}
+}
+
 const project = () => projects[activeProject];
 const stateCache = new Map();
 const cacheKey = () => `${activeProject}/${project().current}`;
 let saveTimer;
 let revision = 0;
 let diagnostics = [];
+let checkedRevision;
+let runRevision;
 let worker;
 let engine = { state: 'loading' };
 let pending;
@@ -46,13 +64,17 @@ let download;
 let previewRun;
 let frame = el('preview-frame');
 let activeTab = 'console';
+let actionFocus = 'run';
 
 function persist() {
+  const status = el('save-status');
   try {
     localStorage.setItem(storageKey, JSON.stringify({ activeProject, projects }));
-    el('save-status').textContent = 'Saved on this device';
+    status.textContent = 'Saved on this device';
+    delete status.parentElement.dataset.kind;
   } catch {
-    el('save-status').textContent = 'Local saving unavailable';
+    status.textContent = 'Local saving unavailable';
+    status.parentElement.dataset.kind = 'error';
   }
 }
 
@@ -129,19 +151,19 @@ const colors = syntaxHighlighting(HighlightStyle.define([
   { tag: tags.operator, color: '#b9c7cc' },
 ]));
 
+const wrapping = new Compartment();
+const wrapExtension = () => layout.wrap ? EditorView.lineWrapping : [];
 const extensions = [
   basicSetup, theme, colors, puddi,
+  wrapping.of(wrapExtension()),
   EditorState.tabSize.of(4),
-  EditorView.contentAttributes.of({ 'aria-label': 'Puddi source code' }),
+  EditorView.contentAttributes.of({ 'aria-label': 'Puddi source code', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false' }),
   EditorView.updateListener.of(update => {
     if (update.docChanged) {
       project().files[project().current] = update.state.doc.toString();
-      revision++;
-      clearWasm();
-      if (diagnostics.length) {
-        diagnostics = [];
-        queueMicrotask(renderDiagnostics);
-      }
+      sourceChanged();
+      setEditorFeedback('');
+      queueMicrotask(renderDiagnostics);
       scheduleSave();
     }
     if (update.docChanged || update.selectionSet) updateCursor();
@@ -158,12 +180,15 @@ function updateCursor() {
 }
 
 function stashEditor() {
-  stateCache.set(cacheKey(), editor.state);
+  stateCache.set(cacheKey(), { state: editor.state, scroll: editor.scrollSnapshot() });
 }
 
 function openEditor() {
-  editor.setState(stateCache.get(cacheKey()) ?? editorState());
-  el('editor-file').textContent = project().current;
+  const cached = stateCache.get(cacheKey());
+  editor.setState(cached?.state ?? editorState());
+  editor.dispatch({ effects: [wrapping.reconfigure(wrapExtension()), ...(cached ? [cached.scroll] : [])] });
+  el('editor-file').textContent = el('editor-file').title = project().current;
+  setEditorFeedback('');
   updateCursor();
   renderFiles();
   renderDiagnostics();
@@ -171,6 +196,7 @@ function openEditor() {
 
 function openFile(name, focus = true) {
   if (!Object.hasOwn(project().files, name)) return;
+  showEditor();
   if (name !== project().current) {
     stashEditor();
     project().current = name;
@@ -181,21 +207,29 @@ function openFile(name, focus = true) {
 }
 
 function setProject(id) {
-  if (id === activeProject) return;
+  showEditor();
+  if (id === activeProject) {
+    editor.focus();
+    return;
+  }
   stop(false);
   stashEditor();
   activeProject = id;
   revision++;
   diagnostics = [];
+  checkedRevision = runRevision = undefined;
   clearWasm();
   clearOutput();
-  resetPreview();
   selectTab('console');
-  setStatus('Browser target');
+  setStatus('Ready to run');
+  updateOutputFreshness();
+  setFileForm(false);
+  el('workspace-feedback').hidden = true;
   el('project-name').textContent = examples[id].name;
   openEditor();
   renderExamples();
   persist();
+  editor.focus();
 }
 
 function label(tag, text, className) {
@@ -207,8 +241,10 @@ function label(tag, text, className) {
 
 function renderFiles() {
   const list = el('files');
+  const names = Object.keys(project().files);
+  el('file-count').textContent = names.length;
   list.replaceChildren();
-  Object.keys(project().files).sort((a, b) =>
+  names.sort((a, b) =>
     a === 'main.pud' ? -1 : b === 'main.pud' ? 1 : a.localeCompare(b),
   ).forEach(name => {
     const row = document.createElement('li');
@@ -217,12 +253,15 @@ function renderFiles() {
     if (name === project().current) button.setAttribute('aria-current', 'page');
     const badge = label('span', 'P', 'file-badge');
     badge.setAttribute('aria-hidden', 'true');
-    button.append(badge, label('span', name));
+    const count = label('span', '', 'file-problems');
+    count.hidden = true;
+    button.dataset.file = name;
+    button.append(badge, label('span', name, 'file-name'), count);
     button.title = name;
     button.addEventListener('click', () => openFile(name));
     row.append(button);
     if (name !== 'main.pud') {
-      const remove = label('button', '×', 'icon-button');
+      const remove = label('button', '×', 'icon-button file-remove');
       remove.type = 'button';
       remove.setAttribute('aria-label', `Remove ${name}`);
       remove.title = `Remove ${name}`;
@@ -240,10 +279,12 @@ function renderFiles() {
           }, { once: true });
           return;
         }
-        if (project().current === name) openFile('main.pud');
+        if (project().current === name) openFile('main.pud', false);
         delete project().files[name];
         stateCache.delete(`${activeProject}/${name}`);
         invalidate();
+        if (mobile.matches) el('toggle-sidebar').focus();
+        else list.querySelector('[aria-current]').focus();
       });
       row.append(remove);
     }
@@ -267,26 +308,36 @@ function renderExamples() {
   }
 }
 
-function invalidate() {
+function sourceChanged() {
   revision++;
   diagnostics = [];
   clearWasm();
+  updateOutputFreshness();
+}
+
+function invalidate() {
+  sourceChanged();
   renderFiles();
   renderDiagnostics();
   persist();
 }
 
 function selectTab(name, focus = false) {
+  const focused = document.activeElement;
+  const moveFocus = focus || (name !== activeTab && (
+    focused === el(`tab-${activeTab}`) || el(activeTab).contains(focused) || focused === el('clear')
+  ));
   activeTab = name;
-  for (const tab of ['console', 'problems', 'preview']) {
+  for (const tab of resultTabs) {
     const selected = tab === name;
     const button = el(`tab-${tab}`);
     button.setAttribute('aria-selected', String(selected));
     button.tabIndex = selected ? 0 : -1;
     el(tab).hidden = !selected;
-    if (selected && focus) button.focus();
+    if (selected && moveFocus) button.focus();
   }
   el('clear').hidden = name !== 'console';
+  if (name === 'console' && consoleFollow) el('console').scrollTop = el('console').scrollHeight;
 }
 
 const resultTabs = ['console', 'problems', 'preview'];
@@ -309,19 +360,44 @@ function setStatus(text, kind = '') {
   status.dataset.kind = kind;
 }
 
+function setEditorFeedback(text, kind = '') {
+  const status = el('editor-feedback');
+  status.textContent = status.title = text;
+  status.dataset.kind = kind;
+}
+
+function updateOutputFreshness() {
+  el('output-freshness').hidden = runRevision === undefined || runRevision === revision;
+}
+
+let consoleFollow = true;
+el('console').addEventListener('scroll', () => {
+  const panel = el('console');
+  if (panel.clientHeight) consoleFollow = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 32;
+}, { passive: true });
+
 function clearOutput() {
+  consoleFollow = true;
   el('output').replaceChildren();
   el('console-empty').hidden = false;
+  el('console-hint').textContent = pending?.action === 'run' ? 'Waiting for program output' : 'Run the program to see its output';
+  el('output-limit').hidden = true;
+  el('clear').disabled = true;
 }
 
 function output(text, className = '') {
   const container = el('output');
-  if (container.children.length >= 500) return;
+  if (container.children.length >= 500) {
+    el('output-limit').hidden = false;
+  } else {
+    const limit = 8000;
+    const line = text.length > limit ? `${text.slice(0, limit)}…` : text;
+    container.append(label('div', line, className));
+  }
   el('console-empty').hidden = true;
+  el('clear').disabled = false;
   const panel = el('console');
-  const follow = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 40;
-  container.append(label('div', text.slice(0, 8000), className));
-  if (follow) panel.scrollTop = panel.scrollHeight;
+  if (consoleFollow && panel.clientHeight) panel.scrollTop = panel.scrollHeight;
 }
 
 function editorPosition(diagnostic) {
@@ -333,9 +409,18 @@ function editorPosition(diagnostic) {
 function renderDiagnostics() {
   const list = el('diagnostics');
   list.replaceChildren();
-  el('problem-count').textContent = String(diagnostics.length);
-  el('problem-count').hidden = !diagnostics.length;
+  const errors = diagnostics.some(item => item.severity === 'error');
+  for (const id of ['problem-count', 'mobile-problem-count']) {
+    const count = el(id);
+    count.textContent = diagnostics.length;
+    count.hidden = !diagnostics.length;
+    count.dataset.kind = errors ? 'error' : 'warning';
+  }
+  const checked = checkedRevision === revision;
+  el('problems-title').textContent = checked ? 'No problems' : checkedRevision === undefined ? 'Source unchecked' : 'Source changed';
+  el('problems-hint').hidden = checked;
   el('problems-empty').hidden = !!diagnostics.length;
+  const byFile = new Map();
   for (const diagnostic of diagnostics) {
     const row = document.createElement('li');
     const navigable = Object.hasOwn(project().files, diagnostic.file);
@@ -344,6 +429,10 @@ function renderDiagnostics() {
     detail.append(label('span', diagnostic.severity === 'warning' ? 'Warning' : 'Error', 'severity'));
     detail.append(label('span', diagnostic.message));
     if (navigable) {
+      const count = byFile.get(diagnostic.file) ?? { total: 0, errors: false };
+      count.total++;
+      count.errors ||= diagnostic.severity === 'error';
+      byFile.set(diagnostic.file, count);
       detail.type = 'button';
       detail.append(label('span', `${diagnostic.file}:${diagnostic.line}:${diagnostic.column}`, 'location'));
       detail.addEventListener('click', () => {
@@ -355,6 +444,17 @@ function renderDiagnostics() {
     for (const note of diagnostic.notes) detail.append(label('span', note, 'note'));
     row.append(detail);
     list.append(row);
+  }
+
+  for (const button of el('files').querySelectorAll('.file-link')) {
+    const issues = byFile.get(button.dataset.file);
+    const count = button.querySelector('.file-problems');
+    count.hidden = !issues;
+    if (issues) {
+      count.textContent = issues.total;
+      count.title = `${issues.total} ${issues.total === 1 ? 'problem' : 'problems'}`;
+      count.dataset.kind = issues.errors ? 'error' : 'warning';
+    }
   }
 
   const current = diagnostics.filter(item => item.file === project().current).map(item => {
@@ -389,23 +489,35 @@ function getWorker() {
     worker?.terminate();
     worker = undefined;
     engine = { state: 'offline' };
+    updateCompilerStatus();
   });
   return worker;
 }
 
 function engineStatus() {
   if (engine.state === 'ready') return engine.stored ? 'Compiler ready' : 'Compiler ready for this tab';
-  if (engine.state === 'reading') return 'Reading compiler from this device';
-  if (engine.state === 'saving') return 'Saving compiler on this device';
+  if (engine.state === 'reading') return 'Reading cached compiler';
+  if (engine.state === 'saving') return 'Saving compiler locally';
   if (engine.state === 'starting') return 'Starting compiler';
-  if (engine.state === 'offline') return 'Compiler will retry on demand';
-  if (engine.retry) return 'Trying another compiler source';
+  if (engine.state === 'offline') return 'Compiler unavailable';
+  if (engine.retry) return 'Trying another download source';
   return engine.percent ? `Downloading compiler ${engine.percent}%` : 'Loading compiler';
 }
 
+function updateCompilerStatus() {
+  const status = el('compiler-status');
+  status.textContent = engineStatus();
+  status.dataset.kind = engine.state === 'offline' ? 'error' : '';
+}
+
 function busy(value) {
-  for (const id of ['run', 'check']) el(id).disabled = value;
+  const focused = document.activeElement;
+  if (value && (focused === el('run') || focused === el('check'))) actionFocus = focused.id;
+  el('run').hidden = value;
+  el('check').disabled = value;
   el('stop').hidden = !value;
+  if (value && (focused === el('run') || focused === el('check'))) el('stop').focus();
+  if (!value && focused === el('stop')) el(actionFocus).focus();
 }
 
 function finish() {
@@ -423,19 +535,22 @@ function limitOperation() {
 }
 
 function fail(message) {
+  const action = pending?.action;
   finish();
-  setStatus('Execution failed', 'error');
+  setStatus(action === 'check' ? 'Check failed' : 'Run failed', 'error');
   output(message, 'stderr');
-  selectTab('console');
+  revealResults('console');
 }
 
 function stop(report = true) {
   if (!pending && !previewRun) return;
+  const action = pending?.action;
   if (pending?.phase === 'compiling') {
     // A synchronous Wasm compilation cannot be interrupted by a message.
     worker?.terminate();
     worker = undefined;
     engine = { state: 'loading' };
+    updateCompilerStatus();
   } else if (pending) {
     worker?.postMessage({ action: 'cancel', id: pending.id });
   }
@@ -443,8 +558,7 @@ function stop(report = true) {
   finish();
   if (report) {
     setStatus('Stopped');
-    output('Stopped', 'meta');
-    selectTab('console');
+    if (action === 'run' && !el('output').childElementCount) output('Stopped', 'meta');
   }
 }
 
@@ -455,19 +569,21 @@ function runAction(action) {
     fail('Reduce the number or size of source files before compiling');
     return;
   }
-  clearWasm();
-  diagnostics = [];
-  renderDiagnostics();
-  clearOutput();
-  selectTab('console');
-  if (action === 'run') resetPreview();
+  if (action === 'run') {
+    clearOutput();
+    resetPreview();
+    runRevision = revision;
+    updateOutputFreshness();
+    el('console-hint').textContent = 'Waiting for program output';
+    revealResults('console');
+  }
   const preview = action === 'run' && files.some(file => /^\s*import\s+std\.dom(?=[\s.;{]|$)/m.test(file.text));
   const id = ++sequence;
   pending = {
     id, action, revision, preview, phase: 'loading',
   };
   busy(true);
-  setStatus(engine.state === 'offline' ? 'Loading compiler' : engineStatus());
+  setStatus(engine.state === 'ready' ? (action === 'check' ? 'Checking' : 'Compiling') : 'Waiting for compiler');
   try {
     getWorker().postMessage({ id, action, files, preview });
   } catch (error) {
@@ -477,51 +593,54 @@ function runAction(action) {
 
 async function formatCurrentFile() {
   const button = el('format');
+  if (button.disabled) return;
+  showEditor();
   const file = project().current;
   const currentProject = project();
   const before = editor.state.doc.toString();
   if (new TextEncoder().encode(before).length > maxSource) {
-    if (!pending) setStatus('Reduce the size of this file before formatting', 'error');
+    setEditorFeedback('File is too large to format', 'error');
     return;
   }
-  delete el('run-status').dataset.phase;
   button.disabled = true;
-  if (!pending) setStatus('Formatting');
+  setEditorFeedback('Formatting');
   try {
     const formatted = await formatSource(before);
-    if (project() !== currentProject || project().current !== file || editor.state.doc.toString() !== before) {
-      if (!pending) setStatus('Source changed');
-      return;
-    }
+    if (project() !== currentProject || project().current !== file || editor.state.doc.toString() !== before) return;
     if (formatted !== before) {
-      editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: formatted } });
-      if (!pending) setStatus('Formatted', 'success');
-    } else if (!pending) {
-      setStatus('Format up to date', 'success');
+      const { head } = editor.state.selection.main;
+      const line = editor.state.doc.lineAt(head);
+      const lines = formatted.split('\n');
+      const index = Math.min(line.number - 1, lines.length - 1);
+      let anchor = Math.min(head - line.from, lines[index].length);
+      for (let i = 0; i < index; i++) anchor += lines[i].length + 1;
+      editor.dispatch({ changes: { from: 0, to: before.length, insert: formatted }, selection: { anchor }, scrollIntoView: true });
+      setEditorFeedback('Formatted', 'success');
+    } else {
+      setEditorFeedback('Already formatted', 'success');
     }
   } catch (error) {
-    if (!pending) setStatus('Formatting failed', 'error');
-    output(error.message, 'stderr');
+    if (project() === currentProject && project().current === file && editor.state.doc.toString() === before) {
+      setEditorFeedback('Formatting failed', 'error');
+      el('editor-feedback').title = error.message;
+    }
   } finally {
     button.disabled = false;
   }
 }
 
-function openPreview(id, wasm) {
+function openPreview(id, wasm, reveal) {
   previewRun = { id, wasm };
   frame.srcdoc = PUDDI_PREVIEW_HTML;
   frame.hidden = false;
   el('preview-empty').hidden = true;
-  selectTab('preview');
+  if (reveal) revealResults('preview');
 }
 
 function receive(data) {
   if (data.kind === 'engine') {
     engine = data;
-    if (pending?.phase === 'loading' || (!pending && el('run-status').dataset.phase === 'warmup')) {
-      setStatus(engineStatus());
-      if (data.state === 'ready' || data.state === 'offline') delete el('run-status').dataset.phase;
-    }
+    updateCompilerStatus();
     return;
   }
   if (pending?.id !== data.id && previewRun?.id !== data.id) return;
@@ -538,14 +657,19 @@ function receive(data) {
       const request = pending;
       finish();
       if (!request || request.revision !== revision) {
-        setStatus('Source changed');
+        setStatus('Source changed during compilation', 'stale');
         return;
       }
       diagnostics = data.diagnostics;
+      checkedRevision = revision;
       renderDiagnostics();
       setStatus(data.ok ? 'Check passed' : 'Compilation failed', data.ok ? 'success' : 'error');
-      if (diagnostics.length) selectTab('problems');
-      else output('Type check passed', 'meta');
+      if (request.action === 'run') el('console-hint').textContent = 'See Problems for compiler diagnostics';
+      if (diagnostics.length) revealResults('problems');
+      else if (!data.ok) {
+        output('Compilation failed without diagnostics', 'stderr');
+        revealResults('console');
+      }
       break;
     }
     case 'compiled':
@@ -553,20 +677,22 @@ function receive(data) {
       limitOperation();
       if (pending.revision === revision) {
         diagnostics = data.diagnostics;
+        checkedRevision = revision;
         renderDiagnostics();
         download = data.wasm;
         el('download-wasm').hidden = false;
       }
       setStatus('Running');
-      if (pending.preview) openPreview(data.id, data.wasm);
+      if (pending.preview) openPreview(data.id, data.wasm, pending.revision === revision && activeTab === 'console'
+        && (!mobile.matches || el('panes').dataset.view === 'results'));
       break;
     case 'line':
       output(data.text, data.fd === 2 ? 'stderr' : '');
       break;
     case 'exit':
       if (pending?.id === data.id) finish();
-      setStatus(`Exit code ${data.code}`, data.code === 0 ? 'success' : 'error');
-      if (!el('output').children.length && activeTab === 'console') output('Program finished without output', 'meta');
+      setStatus(data.code === 0 ? 'Run finished' : `Exit code ${data.code}`, data.code === 0 ? 'success' : 'error');
+      if (!el('output').children.length) output('Program finished without output', 'meta');
       break;
   }
 }
@@ -592,7 +718,10 @@ function saveDownload(name, data, type) {
 for (const action of ['run', 'check']) el(action).addEventListener('click', () => runAction(action));
 el('format').addEventListener('click', () => void formatCurrentFile());
 el('stop').addEventListener('click', () => stop());
-el('clear').addEventListener('click', clearOutput);
+el('clear').addEventListener('click', () => {
+  clearOutput();
+  el('console').focus();
+});
 el('download-source').addEventListener('click', () =>
   saveDownload(project().current.split('/').at(-1), editor.state.doc.toString(), 'text/plain;charset=utf-8'),
 );
@@ -606,11 +735,24 @@ const formError = el('file-error');
 function fileError(message) {
   formError.textContent = message;
   formError.hidden = !message;
+  formName.setAttribute('aria-invalid', String(!!message));
 }
-el('new-file').addEventListener('click', () => {
-  form.hidden = !form.hidden;
+
+function setFileForm(open) {
+  form.hidden = !open;
+  el('new-file').setAttribute('aria-expanded', String(open));
   fileError('');
-  if (!form.hidden) formName.focus();
+  if (open) formName.focus();
+  else form.reset();
+}
+
+el('new-file').addEventListener('click', () => setFileForm(form.hidden));
+formName.addEventListener('input', () => fileError(''));
+form.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  event.preventDefault();
+  setFileForm(false);
+  el('new-file').focus();
 });
 form.addEventListener('submit', event => {
   event.preventDefault();
@@ -620,8 +762,7 @@ form.addEventListener('submit', event => {
   if (Object.hasOwn(project().files, name)) return fileError('That file already exists');
   if (Object.keys(project().files).length >= maxFiles) return fileError('This workspace has reached its file limit');
   project().files[name] = '';
-  form.reset();
-  form.hidden = true;
+  setFileForm(false);
   invalidate();
   openFile(name);
 });
@@ -629,66 +770,214 @@ form.addEventListener('submit', event => {
 el('open-file').addEventListener('click', () => el('file-input').click());
 el('file-input').addEventListener('change', async event => {
   const target = project();
+  const files = Array.from(event.target.files);
+  event.target.value = '';
   const rejected = [];
   const names = [];
-  for (const file of event.target.files) {
-    if (!validName(file.name) || file.size > maxSource || Object.keys(target.files).length >= maxFiles) {
+  for (const file of files) {
+    if (!validName(file.name) || file.size > maxSource) {
       rejected.push(file.name);
       continue;
     }
-    let name = file.name;
-    for (let i = 2; Object.hasOwn(target.files, name); i++) name = `${file.name.slice(0, -4)}_${i}.pud`;
     try {
-      target.files[name] = await file.text();
+      const text = await file.text();
+      if (Object.keys(target.files).length >= maxFiles) {
+        rejected.push(file.name);
+        continue;
+      }
+      let name = file.name;
+      for (let i = 2; Object.hasOwn(target.files, name); i++) name = `${file.name.slice(0, -4)}_${i}.pud`;
+      target.files[name] = text;
       names.push(name);
+      if (target === project()) sourceChanged();
     } catch {
       rejected.push(file.name);
     }
   }
-  event.target.value = '';
   if (target !== project()) {
     persist();
     return;
   }
   if (names.length) {
-    invalidate();
+    renderFiles();
+    renderDiagnostics();
     openFile(names[0]);
   }
-  if (rejected.length) setStatus(`${rejected.length} files could not be imported`, 'error');
+  const feedback = el('workspace-feedback');
+  const message = rejected.length === 1 ? 'One file could not be imported' : `${rejected.length} files could not be imported`;
+  feedback.textContent = rejected.length ? message : '';
+  feedback.hidden = !rejected.length;
+  if (names.length && rejected.length) setEditorFeedback(message, 'error');
 });
 
-const mobile = matchMedia('(max-width: 625px)');
-let sidebarOpen = false;
+const panes = el('panes');
+const divider = el('pane-divider');
+
 function updateSidebar() {
-  el('sidebar').hidden = mobile.matches && !sidebarOpen;
-  el('toggle-sidebar').hidden = !mobile.matches;
-  el('toggle-sidebar').setAttribute('aria-expanded', String(!el('sidebar').hidden));
+  const open = mobile.matches ? mobileSidebar : layout.sidebar;
+  el('sidebar').hidden = !open;
+  el('toggle-sidebar').setAttribute('aria-expanded', String(open));
 }
 el('toggle-sidebar').addEventListener('click', () => {
-  sidebarOpen = !sidebarOpen;
+  if (mobile.matches) mobileSidebar = !mobileSidebar;
+  else {
+    layout.sidebar = !layout.sidebar;
+    saveLayout();
+  }
   updateSidebar();
 });
-mobile.addEventListener('change', updateSidebar);
-updateSidebar();
+
+function updateResults() {
+  const collapsed = !mobile.matches && !layout.results;
+  panes.toggleAttribute('data-collapsed', collapsed);
+  el('results-pane').hidden = divider.hidden = collapsed;
+  el('toggle-results').setAttribute('aria-expanded', String(!collapsed));
+}
+
+function mobileView(name, moveFocus = false) {
+  panes.dataset.view = name;
+  for (const view of ['editor', 'results']) el(`view-${view}`).setAttribute('aria-pressed', String(name === view));
+  if (moveFocus && mobile.matches) el(`view-${name}`).focus();
+  if (name === 'results' && activeTab === 'console' && consoleFollow) el('console').scrollTop = el('console').scrollHeight;
+}
+
+function showEditor() {
+  if (!mobile.matches) return;
+  mobileSidebar = false;
+  updateSidebar();
+  mobileView('editor');
+}
+
+function revealResults(tab) {
+  if (!mobile.matches && !layout.results) {
+    layout.results = true;
+    updateResults();
+    saveLayout();
+  }
+  if (mobile.matches) {
+    const editorFocused = el('editor-pane').contains(document.activeElement);
+    mobileSidebar = false;
+    updateSidebar();
+    mobileView('results', editorFocused);
+  }
+  selectTab(tab);
+}
+
+el('view-editor').addEventListener('click', () => mobileView('editor'));
+el('view-results').addEventListener('click', () => mobileView('results'));
+el('toggle-results').addEventListener('click', () => {
+  layout.results = !layout.results;
+  updateResults();
+  saveLayout();
+});
+
+mobile.addEventListener('change', () => {
+  mobileSidebar = false;
+  updateSidebar();
+  updateResults();
+});
+
+function setEditorShare(share) {
+  const width = panes.clientWidth;
+  if (!width) return;
+  const min = Math.ceil(280 / width * 100);
+  const max = Math.floor((width - 288) / width * 100);
+  layout.share = Math.max(min, Math.min(max, share));
+  panes.style.setProperty('--editor-share', `${layout.share}%`);
+}
+
+function updateDivider() {
+  if (!divider.offsetWidth) return;
+  const width = panes.clientWidth;
+  const percent = px => Math.round(px / width * 100);
+  divider.setAttribute('aria-valuemin', percent(280));
+  divider.setAttribute('aria-valuemax', percent(width - 288));
+  const current = percent(el('editor-pane').offsetWidth);
+  divider.setAttribute('aria-valuenow', current);
+  divider.setAttribute('aria-valuetext', `${current}% editor width`);
+}
+
+divider.addEventListener('pointerdown', event => {
+  if (event.button !== 0 || divider.hasAttribute('data-dragging')) return;
+  divider.focus();
+  divider.setPointerCapture(event.pointerId);
+  divider.setAttribute('data-dragging', '');
+});
+divider.addEventListener('pointermove', event => {
+  if (!divider.hasPointerCapture(event.pointerId)) return;
+  const { left, width } = panes.getBoundingClientRect();
+  setEditorShare((event.clientX - left - divider.offsetWidth / 2) / width * 100);
+});
+divider.addEventListener('lostpointercapture', () => {
+  divider.removeAttribute('data-dragging');
+  saveLayout();
+});
+divider.addEventListener('keydown', event => {
+  const current = Number(divider.getAttribute('aria-valuenow'));
+  const shares = { ArrowLeft: current - 4, ArrowRight: current + 4, Home: 0, End: 100 };
+  if (!Object.hasOwn(shares, event.key)) return;
+  event.preventDefault();
+  setEditorShare(shares[event.key]);
+  saveLayout();
+});
+const resize = new ResizeObserver(updateDivider);
+resize.observe(el('editor-pane'));
+
+function updateWrap() {
+  el('wrap').setAttribute('aria-pressed', String(layout.wrap));
+}
+el('wrap').addEventListener('click', () => {
+  layout.wrap = !layout.wrap;
+  editor.dispatch({ effects: wrapping.reconfigure(wrapExtension()), scrollIntoView: true });
+  updateWrap();
+  saveLayout();
+});
+
+const apple = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
+const modifier = apple ? 'Command' : 'Ctrl';
+const ariaModifier = apple ? 'Meta' : 'Control';
+for (const [id, title, keys] of [
+  ['run', 'Run program', ['Enter']],
+  ['check', 'Check types', ['Shift', 'Enter']],
+  ['format', 'Format current file', ['Shift', 'F']],
+]) {
+  el(id).title = `${title} ${[modifier, ...keys].join(' + ')}`;
+  el(id).setAttribute('aria-keyshortcuts', [ariaModifier, ...keys].join('+'));
+}
+el('run-key').textContent = apple ? '⌘ ↵' : 'Ctrl ↵';
 
 document.addEventListener('keydown', event => {
-  if (!(event.metaKey || event.ctrlKey) || event.key !== 'Enter') return;
+  if (event.defaultPrevented) return;
+  if (event.key === 'Escape' && mobile.matches && mobileSidebar) {
+    mobileSidebar = false;
+    updateSidebar();
+    el('toggle-sidebar').focus();
+    return;
+  }
+  if (!(event.metaKey || event.ctrlKey) || event.altKey || event.isComposing || event.repeat) return;
+  if (event.key.toLowerCase() === 'f' && event.shiftKey) {
+    event.preventDefault();
+    void formatCurrentFile();
+    return;
+  }
+  if (event.key !== 'Enter') return;
   event.preventDefault();
   runAction(event.shiftKey ? 'check' : 'run');
 });
+panes.style.setProperty('--editor-share', `${layout.share}%`);
+updateSidebar();
+updateResults();
+updateWrap();
 el('project-name').textContent = examples[activeProject].name;
-el('editor-file').textContent = project().current;
+el('editor-file').textContent = el('editor-file').title = project().current;
 renderFiles();
 renderExamples();
 updateCursor();
 
 // Prepare the compiler while the visitor reads or edits the source.
 try {
-  el('run-status').dataset.phase = 'warmup';
-  setStatus(engineStatus());
   getWorker().postMessage({ action: 'warmup' });
 } catch {
   engine = { state: 'offline' };
-  delete el('run-status').dataset.phase;
-  setStatus(engineStatus());
+  updateCompilerStatus();
 }
