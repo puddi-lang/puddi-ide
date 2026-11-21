@@ -44,7 +44,6 @@ let pending;
 let sequence = 0;
 let download;
 let previewRun;
-let previewHtml;
 let frame = el('preview-frame');
 let activeTab = 'console';
 
@@ -505,21 +504,12 @@ async function formatCurrentFile() {
   }
 }
 
-async function openPreview(id, wasm) {
-  try {
-    previewHtml ??= await fetch(new URL('./preview.html', import.meta.url)).then(response => {
-      if (!response.ok) throw new Error('Could not load the preview');
-      return response.text();
-    });
-    if (pending?.id !== id) return;
-    previewRun = { id, wasm };
-    frame.srcdoc = previewHtml;
-    frame.hidden = false;
-    el('preview-empty').hidden = true;
-    selectTab('preview');
-  } catch (error) {
-    if (pending?.id === id) fail(error.message);
-  }
+function openPreview(id, wasm) {
+  previewRun = { id, wasm };
+  frame.srcdoc = PUDDI_PREVIEW_HTML;
+  frame.hidden = false;
+  el('preview-empty').hidden = true;
+  selectTab('preview');
 }
 
 function receive(data) {
@@ -565,7 +555,7 @@ function receive(data) {
         el('download-wasm').hidden = false;
       }
       setStatus('Running');
-      if (pending.preview) void openPreview(data.id, data.wasm);
+      if (pending.preview) openPreview(data.id, data.wasm);
       break;
     case 'line':
       output(data.text, data.fd === 2 ? 'stderr' : '');

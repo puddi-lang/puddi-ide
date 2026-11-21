@@ -55,22 +55,30 @@ const worker = await code('web/compiler-worker.js', {
   },
 });
 const workerName = `compiler-worker.${digest(worker)}.js`;
+const script = (await code('web/preview.js', {
+  // The opaque preview frame cannot start nested workers.
+  define: { 'import.meta.url': '""' },
+})).replace(/<\/script/gi, '<\\/script');
+const hash = createHash('sha256').update(script).digest('base64');
+const preview = `<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-${hash}' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; connect-src https: http:; base-uri 'none'; form-action 'none'">
+<title>Puddi preview</title>
+<style>body{margin:24px;background:white;color:#17232a;font:16px/1.5 system-ui}button,input{font:inherit}</style>
+<body><main id="app"></main><script type="module">${script}</script></body>
+</html>`;
 const app = await code('web/app.js', {
   define: {
     PUDDI_COMPILER_WORKER: JSON.stringify(workerName),
     PUDDI_FORMATTER: JSON.stringify(formatter.toString('base64')),
+    PUDDI_PREVIEW_HTML: JSON.stringify(preview),
   },
 });
 const appName = `app.${digest(app)}.js`;
 const html = (await readFile('web/index.html', 'utf8'))
   .replaceAll('__PUDDI_COMPILER_WORKER__', workerName)
   .replaceAll('__PUDDI_APP__', appName);
-
-const script = (await code('web/preview.js', {
-  // The opaque preview frame cannot start nested workers.
-  define: { 'import.meta.url': '""' },
-})).replace(/<\/script/gi, '<\\/script');
-const hash = createHash('sha256').update(script).digest('base64');
 
 await rm('dist', { recursive: true, force: true });
 await mkdir('dist');
@@ -84,12 +92,4 @@ await Promise.all([
   writeFile(`dist/${compilerName}`, compiler),
   writeFile(`dist/${compilerName}.gz`, gzipSync(compiler, { level: 9 })),
   writeFile('dist/.nojekyll', ''),
-  writeFile('dist/preview.html', `<!doctype html>
-<html lang="en">
-<meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-${hash}' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; connect-src https: http:; base-uri 'none'; form-action 'none'">
-<title>Puddi preview</title>
-<style>body{margin:24px;background:white;color:#17232a;font:16px/1.5 system-ui}button,input{font:inherit}</style>
-<body><main id="app"></main><script type="module">${script}</script></body>
-</html>`),
 ]);
