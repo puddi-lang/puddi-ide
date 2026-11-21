@@ -1,3 +1,5 @@
+import { compilerDirectory, readCompiler, saveCompiler } from './compiler-storage.js';
+
 let compilerPromise;
 let engine = { state: 'loading' };
 let current;
@@ -12,12 +14,20 @@ function send(kind, id, fields = {}, transfer = []) {
   self.postMessage({ kind, id, ...fields }, transfer);
 }
 
-function showEngine(state, percent) {
-  engine = { state, percent };
+function showEngine(state, details = {}) {
+  engine = { state, ...details };
   send('engine', null, engine);
 }
 
-async function instantiateCompiler(response, compressed, reportProgress) {
+async function downloadCompiler() {
+  const compressed = typeof DecompressionStream === 'function';
+  const url = new URL(PUDDI_COMPILER_ASSET.url + (compressed ? '.gz' : ''), import.meta.url);
+  showEngine('loading');
+  const response = await fetch(url, {
+    credentials: 'omit',
+    redirect: 'error',
+    signal: AbortSignal.timeout(120_000),
+  });
   if (!response.ok || !response.body) throw new Error('Could not download the Puddi compiler');
 
   const total = Number(response.headers.get('content-length'));
@@ -28,7 +38,7 @@ async function instantiateCompiler(response, compressed, reportProgress) {
       received += chunk.byteLength;
       const percent = total ? Math.min(100, Math.floor(received / total * 100)) : 0;
       if (percent >= lastPercent + 5) {
-        showEngine(percent === 100 ? 'starting' : 'loading', percent);
+        showEngine(percent === 100 ? 'starting' : 'loading', { percent });
         lastPercent = percent;
       }
       controller.enqueue(chunk);
@@ -37,37 +47,51 @@ async function instantiateCompiler(response, compressed, reportProgress) {
       if (lastPercent < 100) showEngine('starting');
     },
   });
-  const incoming = reportProgress ? response.body.pipeThrough(progress) : response.body;
+  const incoming = response.body.pipeThrough(progress);
   const wasm = compressed ? incoming.pipeThrough(new DecompressionStream('gzip')) : incoming;
-  const module = new Response(wasm, { headers: { 'Content-Type': 'application/wasm' } });
-  const { instance } = await WebAssembly.instantiateStreaming(module);
+  return new Response(wasm).arrayBuffer();
+}
+
+async function validCompiler(bytes) {
+  if (bytes.byteLength !== PUDDI_COMPILER_ASSET.size) return false;
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  const hex = Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('');
+  return hex === PUDDI_COMPILER_ASSET.sha256;
+}
+
+async function instantiateCompiler(bytes) {
+  const { instance } = await WebAssembly.instantiate(bytes);
   return instance.exports;
 }
 
-async function loadCompiler() {
-  const compressed = typeof DecompressionStream === 'function';
-  const filename = compressed ? `${PUDDI_COMPILER_WASM}.gz` : PUDDI_COMPILER_WASM;
-  const url = new URL(filename, import.meta.url).href;
-  const cache = await self.caches?.open('puddi-ide-compiler-v1').catch(() => undefined);
-  const cached = await cache?.match(url).catch(() => undefined);
-  if (cached) {
-    showEngine('starting');
-    try {
-      const wasm = await instantiateCompiler(cached, compressed, false);
-      showEngine('ready');
+async function loadFromStorage(directory) {
+  const { name, size } = PUDDI_COMPILER_ASSET;
+  if (directory) {
+    const local = await readCompiler(directory, name, size);
+    if (local && await validCompiler(local)) {
+      showEngine('reading');
+      const wasm = await instantiateCompiler(local);
+      showEngine('ready', { stored: true });
       return wasm;
-    } catch {
-      await cache.delete(url).catch(() => {});
     }
   }
 
-  showEngine('loading');
-  const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
-  const copy = cache && response.ok ? response.clone() : undefined;
-  const wasm = await instantiateCompiler(response, compressed, true);
-  if (copy) await cache.put(url, copy).catch(() => {});
-  showEngine('ready');
+  const bytes = await downloadCompiler();
+  if (!await validCompiler(bytes)) throw new Error('The Puddi compiler download failed its integrity check');
+  const wasm = await instantiateCompiler(bytes);
+  let stored = false;
+  if (directory) {
+    showEngine('saving');
+    stored = await saveCompiler(directory, name, bytes).then(() => true, () => false);
+  }
+  showEngine('ready', { stored });
   return wasm;
+}
+
+async function loadCompiler() {
+  const directory = await compilerDirectory();
+  if (!directory || !navigator.locks) return loadFromStorage(directory);
+  return navigator.locks.request(`puddi-ide:${PUDDI_COMPILER_ASSET.name}`, () => loadFromStorage(directory));
 }
 
 function getCompiler() {

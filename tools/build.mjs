@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
 import { gzipSync } from 'node:zlib';
 import { build } from 'esbuild';
 
@@ -14,9 +15,11 @@ function run(command, args) {
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
-const prebuilt = process.argv[2] === '--compiler' && process.argv[3];
-if (process.argv.length > 2 && (!prebuilt || process.argv.length !== 4)) {
-  throw new Error('Usage: node tools/build.mjs [--compiler path/to/compiler.wasm]');
+const { values: { compiler: prebuilt, 'cdn-ref': cdnRef } } = parseArgs({
+  options: { compiler: { type: 'string' }, 'cdn-ref': { type: 'string' } },
+});
+if (cdnRef !== undefined && !/^[0-9a-f]{40}$/.test(cdnRef)) {
+  throw new Error('--cdn-ref must be a full Git commit hash');
 }
 if (!prebuilt) {
   run('cargo', [
@@ -35,8 +38,16 @@ run('rustc', [
 ]);
 const formatter = await readFile('compiler/target/formatter.wasm');
 
-const digest = bytes => createHash('sha256').update(bytes).digest('hex').slice(0, 16);
-const compilerName = `compiler.${digest(compiler)}.wasm`;
+const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+const digest = bytes => sha256(bytes).slice(0, 16);
+const compilerHash = sha256(compiler);
+const compilerName = `compiler.${compilerHash.slice(0, 16)}.wasm`;
+const compilerAsset = {
+  name: compilerName,
+  url: cdnRef ? `https://cdn.jsdelivr.net/gh/puddi-lang/puddi-ide@${cdnRef}/${compilerName}` : compilerName,
+  sha256: compilerHash,
+  size: compiler.length,
+};
 const code = async (entry, options = {}) => (await build({
   entryPoints: [entry],
   bundle: true,
@@ -50,7 +61,7 @@ const code = async (entry, options = {}) => (await build({
 const runner = await code('web/runtime-worker.js');
 const worker = await code('web/compiler-worker.js', {
   define: {
-    PUDDI_COMPILER_WASM: JSON.stringify(compilerName),
+    PUDDI_COMPILER_ASSET: JSON.stringify(compilerAsset),
     PUDDI_RUNNER_CODE: JSON.stringify(runner),
   },
 });

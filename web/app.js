@@ -394,7 +394,9 @@ function getWorker() {
 }
 
 function engineStatus() {
-  if (engine.state === 'ready') return 'Compiler ready';
+  if (engine.state === 'ready') return engine.stored ? 'Compiler ready' : 'Compiler ready for this tab';
+  if (engine.state === 'reading') return 'Reading compiler from this device';
+  if (engine.state === 'saving') return 'Saving compiler on this device';
   if (engine.state === 'starting') return 'Starting compiler';
   if (engine.state === 'offline') return 'Compiler will retry on demand';
   return engine.percent ? `Downloading compiler ${engine.percent}%` : 'Loading compiler';
