@@ -4,7 +4,9 @@
 
 Write, check, format and run Puddi in a browser with WebAssembly GC support. The editor supports multiple modules, clickable compiler diagnostics, console output and an isolated preview for programs that use `std.dom`. Workspaces and edited examples are saved in this browser. Source files can be imported or downloaded, and successful runs make the generated core Wasm module available for download.
 
-The browser uses the real Puddi v0.1.0 toolchain, pinned as a Git submodule and compiled to WebAssembly. Format uses a small standalone build of the upstream formatter. On the first visit, the published IDE downloads the compressed compiler from jsDelivr, checks its SHA-256 digest and saves the verified Wasm in the browser's origin private file system (OPFS). Later visits load that file into the compiler worker. Browsers that block OPFS can use the compiler for the current tab. The console and preview runners load with the IDE, and repeat actions on unchanged files can reuse the most recent result.
+The browser uses the real Puddi v0.1.0 toolchain, pinned as a Git submodule and compiled to WebAssembly. Format uses a small standalone build of the upstream formatter. On the first visit, the published IDE downloads the compressed compiler from jsDelivr or one of its mirrors, checks its SHA-256 digest and saves the verified Wasm in the browser's origin private file system (OPFS). Later visits load that file into the compiler worker. Browsers that block OPFS can use the compiler for the current tab. The console and preview runners load with the IDE, and repeat actions on unchanged files can reuse the most recent result.
+
+Browsers configured for Simplified Chinese (`zh-CN`, `zh-Hans` or `zh-Hans-CN`) try [JSDMirror](https://cdn.jsdmirror.com/) and [渺软公益 CDN](https://cdn.onmicrosoft.cn/) before jsDelivr. Other browsers try jsDelivr first. A timed-out download or a failed integrity check automatically advances to the next source.
 
 The JavaScript runtime comes from the same compiler revision. The IDE targets the browser and compiles local source files with the browser standard library. Packages with Git dependencies, WASI components and plugins should use [the `pud` CLI](https://puddi-lang.github.io/puddi-docs/toolchain/pud.html).
 
@@ -38,7 +40,7 @@ Use a full commit containing both `compiler.<hash>.wasm` and `compiler.<hash>.wa
 node tools/build.mjs --compiler /path/to/compiler.wasm --cdn-ref <published-commit>
 ```
 
-Local builds omit `--cdn-ref` and serve the compiler alongside the app. The published compiler worker fetches the pinned jsDelivr URL and rejects redirects.
+Local builds omit `--cdn-ref` and serve the compiler alongside the app. The published compiler worker uses the same pinned commit on every CDN and rejects redirects.
 
 ## License
 

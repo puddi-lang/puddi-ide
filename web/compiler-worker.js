@@ -20,36 +20,79 @@ function showEngine(state, details = {}) {
 }
 
 async function downloadCompiler() {
+  const [primary, ...mirrors] = PUDDI_COMPILER_ASSET.urls;
+  const preferMirrors = navigator.languages?.some(language => /^(zh-CN|zh-Hans(-CN)?)$/i.test(language));
+  const urls = preferMirrors ? [...mirrors, primary] : [primary, ...mirrors];
   const compressed = typeof DecompressionStream === 'function';
-  const url = new URL(PUDDI_COMPILER_ASSET.url + (compressed ? '.gz' : ''), import.meta.url);
-  showEngine('loading');
-  const response = await fetch(url, {
-    credentials: 'omit',
-    redirect: 'error',
-    signal: AbortSignal.timeout(120_000),
-  });
-  if (!response.ok || !response.body) throw new Error('Could not download the Puddi compiler');
+  let lastError;
+  for (const [index, source] of urls.entries()) {
+    const url = new URL(source + (compressed ? '.gz' : ''), import.meta.url);
+    showEngine('loading', { retry: index > 0 });
+    try {
+      return await downloadFrom(url, compressed);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
 
-  const total = Number(response.headers.get('content-length'));
-  let received = 0;
-  let lastPercent = 0;
-  const progress = new TransformStream({
-    transform(chunk, controller) {
-      received += chunk.byteLength;
-      const percent = total ? Math.min(100, Math.floor(received / total * 100)) : 0;
-      if (percent >= lastPercent + 5) {
-        showEngine(percent === 100 ? 'starting' : 'loading', { percent });
-        lastPercent = percent;
-      }
-      controller.enqueue(chunk);
-    },
-    flush() {
-      if (lastPercent < 100) showEngine('starting');
-    },
-  });
-  const incoming = response.body.pipeThrough(progress);
-  const wasm = compressed ? incoming.pipeThrough(new DecompressionStream('gzip')) : incoming;
-  return new Response(wasm).arrayBuffer();
+async function downloadFrom(url, compressed) {
+  const request = new AbortController();
+  const deadline = setTimeout(() => request.abort(), 60_000);
+  let idle;
+  function abortIfIdle(delay) {
+    clearTimeout(idle);
+    idle = setTimeout(() => request.abort(), delay);
+  }
+  try {
+    abortIfIdle(8_000);
+    const response = await fetch(url, {
+      credentials: 'omit',
+      redirect: 'error',
+      signal: request.signal,
+    });
+    if (!response.ok || !response.body) throw new Error('Could not download the Puddi compiler');
+    abortIfIdle(10_000);
+
+    const total = Number(response.headers.get('content-length'));
+    let received = 0;
+    let lastPercent = 0;
+    const progress = new TransformStream({
+      transform(chunk, controller) {
+        abortIfIdle(10_000);
+        received += chunk.byteLength;
+        const percent = total ? Math.min(100, Math.floor(received / total * 100)) : 0;
+        if (percent >= lastPercent + 5) {
+          showEngine(percent === 100 ? 'starting' : 'loading', { percent });
+          lastPercent = percent;
+        }
+        controller.enqueue(chunk);
+      },
+      flush() {
+        clearTimeout(idle);
+        if (lastPercent < 100) showEngine('starting');
+      },
+    });
+    const incoming = response.body.pipeThrough(progress);
+    const wasm = compressed ? incoming.pipeThrough(new DecompressionStream('gzip')) : incoming;
+    const bytes = new Uint8Array(PUDDI_COMPILER_ASSET.size);
+    let offset = 0;
+    const integrityError = 'The Puddi compiler download failed its integrity check';
+    await wasm.pipeTo(new WritableStream({
+      write(chunk) {
+        if (offset + chunk.byteLength > bytes.byteLength) throw new Error(integrityError);
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      },
+    }), { signal: request.signal });
+    if (offset !== bytes.byteLength || !await validCompiler(bytes)) throw new Error(integrityError);
+    return bytes.buffer;
+  } finally {
+    clearTimeout(deadline);
+    clearTimeout(idle);
+    request.abort();
+  }
 }
 
 async function validCompiler(bytes) {
@@ -77,7 +120,6 @@ async function loadFromStorage(directory) {
   }
 
   const bytes = await downloadCompiler();
-  if (!await validCompiler(bytes)) throw new Error('The Puddi compiler download failed its integrity check');
   const wasm = await instantiateCompiler(bytes);
   let stored = false;
   if (directory) {

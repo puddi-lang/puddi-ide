@@ -399,6 +399,7 @@ function engineStatus() {
   if (engine.state === 'saving') return 'Saving compiler on this device';
   if (engine.state === 'starting') return 'Starting compiler';
   if (engine.state === 'offline') return 'Compiler will retry on demand';
+  if (engine.retry) return 'Trying another compiler source';
   return engine.percent ? `Downloading compiler ${engine.percent}%` : 'Loading compiler';
 }
 

@@ -42,9 +42,12 @@ const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const digest = bytes => sha256(bytes).slice(0, 16);
 const compilerHash = sha256(compiler);
 const compilerName = `compiler.${compilerHash.slice(0, 16)}.wasm`;
+const compilerHosts = ['cdn.jsdelivr.net', 'cdn.jsdmirror.cn', 'jsd.onmicrosoft.cn'];
 const compilerAsset = {
   name: compilerName,
-  url: cdnRef ? `https://cdn.jsdelivr.net/gh/puddi-lang/puddi-ide@${cdnRef}/${compilerName}` : compilerName,
+  urls: cdnRef
+    ? compilerHosts.map(host => `https://${host}/gh/puddi-lang/puddi-ide@${cdnRef}/${compilerName}`)
+    : [compilerName],
   sha256: compilerHash,
   size: compiler.length,
 };
