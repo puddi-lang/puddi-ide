@@ -1,6 +1,8 @@
-import { load } from './puddi-runtime.mjs';
+import { load } from '../compiler/upstream/src/runtime.mjs';
 
-self.addEventListener('message', async ({ data: { id, bytes } }) => {
+self.addEventListener('message', async ({ data }) => {
+  if (data?.kind !== 'run') return;
+  const { id, bytes } = data;
   const send = (kind, fields) => self.postMessage({ id, kind, ...fields });
   let lines = 0;
   try {

@@ -7,7 +7,18 @@
   <meta name="description" content="Write, check and run Puddi in your browser">
   <title>Puddi IDE</title>
   <link rel="stylesheet" href="./styles.css">
-  <link rel="modulepreload" href="./compiler-worker.js">
+  <script>
+    try {
+      const compiler = new Worker('./__PUDDI_COMPILER_WORKER__', { type: 'module' });
+      window.puddiWarmCompiler = compiler;
+      compiler.addEventListener('error', () => {
+        if (window.puddiWarmCompiler !== compiler) return;
+        compiler.terminate();
+        delete window.puddiWarmCompiler;
+      }, { once: true });
+      compiler.postMessage({ action: 'warmup' });
+    } catch {}
+  </script>
 </head>
 <body>
   <header class="topbar">
@@ -128,6 +139,6 @@
   </main>
 
   <noscript>Enable JavaScript to use the Puddi IDE</noscript>
-  <script type="module" src="./app.js"></script>
+  <script type="module" src="./__PUDDI_APP__"></script>
 </body>
 </html>

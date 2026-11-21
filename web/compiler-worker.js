@@ -1,6 +1,8 @@
 let compilerPromise;
+let engine = { state: 'loading' };
 let current;
 let runner;
+let runnerUrl;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const recent = new Map();
@@ -10,13 +12,12 @@ function send(kind, id, fields = {}, transfer = []) {
   self.postMessage({ kind, id, ...fields }, transfer);
 }
 
-async function loadCompiler() {
-  const compressed = typeof DecompressionStream === 'function';
-  const filename = compressed ? 'compiler.wasm.gz' : 'compiler.wasm';
-  send('engine', null, { state: 'loading' });
-  const response = await fetch(new URL(filename, import.meta.url), {
-    signal: AbortSignal.timeout(120_000),
-  });
+function showEngine(state, percent) {
+  engine = { state, percent };
+  send('engine', null, engine);
+}
+
+async function instantiateCompiler(response, compressed, reportProgress) {
   if (!response.ok || !response.body) throw new Error('Could not download the Puddi compiler');
 
   const total = Number(response.headers.get('content-length'));
@@ -27,27 +28,52 @@ async function loadCompiler() {
       received += chunk.byteLength;
       const percent = total ? Math.min(100, Math.floor(received / total * 100)) : 0;
       if (percent >= lastPercent + 5) {
-        send('engine', null, { state: percent === 100 ? 'starting' : 'loading', percent });
+        showEngine(percent === 100 ? 'starting' : 'loading', percent);
         lastPercent = percent;
       }
       controller.enqueue(chunk);
     },
     flush() {
-      if (lastPercent < 100) send('engine', null, { state: 'starting' });
+      if (lastPercent < 100) showEngine('starting');
     },
   });
-  const incoming = response.body.pipeThrough(progress);
+  const incoming = reportProgress ? response.body.pipeThrough(progress) : response.body;
   const wasm = compressed ? incoming.pipeThrough(new DecompressionStream('gzip')) : incoming;
   const module = new Response(wasm, { headers: { 'Content-Type': 'application/wasm' } });
   const { instance } = await WebAssembly.instantiateStreaming(module);
-  send('engine', null, { state: 'ready' });
   return instance.exports;
+}
+
+async function loadCompiler() {
+  const compressed = typeof DecompressionStream === 'function';
+  const filename = compressed ? `${PUDDI_COMPILER_WASM}.gz` : PUDDI_COMPILER_WASM;
+  const url = new URL(filename, import.meta.url).href;
+  const cache = await self.caches?.open('puddi-ide-compiler-v1').catch(() => undefined);
+  const cached = await cache?.match(url).catch(() => undefined);
+  if (cached) {
+    showEngine('starting');
+    try {
+      const wasm = await instantiateCompiler(cached, compressed, false);
+      showEngine('ready');
+      return wasm;
+    } catch {
+      await cache.delete(url).catch(() => {});
+    }
+  }
+
+  showEngine('loading');
+  const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
+  const copy = cache && response.ok ? response.clone() : undefined;
+  const wasm = await instantiateCompiler(response, compressed, true);
+  if (copy) await cache.put(url, copy).catch(() => {});
+  showEngine('ready');
+  return wasm;
 }
 
 function getCompiler() {
   compilerPromise ??= loadCompiler().catch(error => {
     compilerPromise = undefined;
-    send('engine', null, { state: 'offline' });
+    showEngine('offline');
     throw error;
   });
   return compilerPromise;
@@ -76,7 +102,9 @@ function execute(wasm, action, files) {
 
 function getRunner() {
   if (runner) return runner;
-  const created = new Worker(new URL('./runtime-worker.js', import.meta.url), { type: 'module' });
+  // The runner travels with this worker so Run does not wait for more scripts.
+  runnerUrl ??= URL.createObjectURL(new Blob([PUDDI_RUNNER_CODE], { type: 'text/javascript' }));
+  const created = new Worker(runnerUrl, { type: 'module' });
   created.onmessage = ({ data }) => {
     if (current?.id !== data.id || runner !== created) return;
     self.postMessage(data);
@@ -106,6 +134,7 @@ function cancel(id) {
 
 self.addEventListener('message', async ({ data }) => {
   if (data?.action === 'warmup') {
+    send('engine', null, engine);
     void getCompiler().catch(() => {});
     return;
   }
@@ -113,7 +142,7 @@ self.addEventListener('message', async ({ data }) => {
     cancel(data.id);
     return;
   }
-  if (!['check', 'run', 'format'].includes(data?.action)) return;
+  if (!['check', 'run'].includes(data?.action)) return;
 
   const { id, action, files, preview } = data;
   if (current) cancel(current.id);
@@ -142,7 +171,7 @@ self.addEventListener('message', async ({ data }) => {
     }
     const input = bytes.slice().buffer;
     job.running = true;
-    getRunner().postMessage({ id, bytes: input }, [input]);
+    getRunner().postMessage({ kind: 'run', id, bytes: input }, [input]);
   } catch (error) {
     if (current !== job) return;
     send('failure', id, { message: error.message });

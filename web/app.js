@@ -5,6 +5,7 @@ import { HighlightStyle, StreamLanguage, syntaxHighlighting } from '@codemirror/
 import { setDiagnostics } from '@codemirror/lint';
 import { tags } from '@lezer/highlight';
 import { examples } from './examples.js';
+import { formatSource } from './formatter.js';
 
 const el = id => document.getElementById(id);
 const storageKey = 'puddi-ide/v1';
@@ -381,7 +382,8 @@ function resetPreview() {
 
 function getWorker() {
   if (worker) return worker;
-  worker = new Worker(new URL('./compiler-worker.js', import.meta.url), { type: 'module' });
+  worker = window.puddiWarmCompiler ?? new Worker(new URL(PUDDI_COMPILER_WORKER, import.meta.url), { type: 'module' });
+  delete window.puddiWarmCompiler;
   worker.addEventListener('message', ({ data }) => receive(data));
   worker.addEventListener('error', event => {
     if (pending) fail(event.message || 'The compiler could not start');
@@ -400,7 +402,7 @@ function engineStatus() {
 }
 
 function busy(value) {
-  for (const id of ['run', 'check', 'format']) el(id).disabled = value;
+  for (const id of ['run', 'check']) el(id).disabled = value;
   el('stop').hidden = !value;
 }
 
@@ -446,26 +448,21 @@ function stop(report = true) {
 
 function runAction(action) {
   if (pending) return;
-  const snapshot = action === 'format'
-    ? [[project().current, project().files[project().current]]]
-    : Object.entries(project().files);
-  const files = snapshot.map(([name, text]) => ({ name, text }));
+  const files = Object.entries(project().files).map(([name, text]) => ({ name, text }));
   if (new TextEncoder().encode(JSON.stringify(files)).length > maxSource) {
     fail('Reduce the number or size of source files before compiling');
     return;
   }
   clearWasm();
-  if (action !== 'format') {
-    diagnostics = [];
-    renderDiagnostics();
-    clearOutput();
-    selectTab('console');
-  }
+  diagnostics = [];
+  renderDiagnostics();
+  clearOutput();
+  selectTab('console');
   if (action === 'run') resetPreview();
   const preview = action === 'run' && files.some(file => /^\s*import\s+std\.dom(?=[\s.;{]|$)/m.test(file.text));
   const id = ++sequence;
   pending = {
-    id, action, revision, preview, name: project().current, phase: 'loading',
+    id, action, revision, preview, phase: 'loading',
   };
   busy(true);
   setStatus(engine.state === 'offline' ? 'Loading compiler' : engineStatus());
@@ -473,6 +470,38 @@ function runAction(action) {
     getWorker().postMessage({ id, action, files, preview });
   } catch (error) {
     fail(error.message);
+  }
+}
+
+async function formatCurrentFile() {
+  const button = el('format');
+  const file = project().current;
+  const currentProject = project();
+  const before = editor.state.doc.toString();
+  if (new TextEncoder().encode(before).length > maxSource) {
+    if (!pending) setStatus('Reduce the size of this file before formatting', 'error');
+    return;
+  }
+  delete el('run-status').dataset.phase;
+  button.disabled = true;
+  if (!pending) setStatus('Formatting');
+  try {
+    const formatted = await formatSource(before);
+    if (project() !== currentProject || project().current !== file || editor.state.doc.toString() !== before) {
+      if (!pending) setStatus('Source changed');
+      return;
+    }
+    if (formatted !== before) {
+      editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: formatted } });
+      if (!pending) setStatus('Formatted', 'success');
+    } else if (!pending) {
+      setStatus('Format up to date', 'success');
+    }
+  } catch (error) {
+    if (!pending) setStatus('Formatting failed', 'error');
+    output(error.message, 'stderr');
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -507,7 +536,7 @@ function receive(data) {
     case 'phase':
       pending.phase = data.phase;
       limitOperation();
-      setStatus(pending.action === 'format' ? 'Formatting' : pending.action === 'check' ? 'Checking' : 'Compiling');
+      setStatus(pending.action === 'check' ? 'Checking' : 'Compiling');
       break;
     case 'failure':
       fail(data.message);
@@ -519,20 +548,11 @@ function receive(data) {
         setStatus('Source changed');
         return;
       }
-      if (request.action === 'format' && data.ok) {
-        if (data.formatted !== editor.state.doc.toString() && request.name === project().current) {
-          editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: data.formatted } });
-          setStatus('Formatted', 'success');
-        } else {
-          setStatus('Format up to date', 'success');
-        }
-      } else {
-        diagnostics = data.diagnostics;
-        renderDiagnostics();
-        setStatus(data.ok ? 'Check passed' : 'Compilation failed', data.ok ? 'success' : 'error');
-        if (diagnostics.length) selectTab('problems');
-        else output('Type check passed', 'meta');
-      }
+      diagnostics = data.diagnostics;
+      renderDiagnostics();
+      setStatus(data.ok ? 'Check passed' : 'Compilation failed', data.ok ? 'success' : 'error');
+      if (diagnostics.length) selectTab('problems');
+      else output('Type check passed', 'meta');
       break;
     }
     case 'compiled':
@@ -576,7 +596,8 @@ function saveDownload(name, data, type) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-for (const action of ['run', 'check', 'format']) el(action).addEventListener('click', () => runAction(action));
+for (const action of ['run', 'check']) el(action).addEventListener('click', () => runAction(action));
+el('format').addEventListener('click', () => void formatCurrentFile());
 el('stop').addEventListener('click', () => stop());
 el('clear').addEventListener('click', clearOutput);
 el('download-source').addEventListener('click', () =>
