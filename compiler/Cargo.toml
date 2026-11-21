@@ -1,0 +1,24 @@
+[package]
+name = "puddi-ide-compiler"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wat = "=1.263.0"
+wasm-encoder = "=0.263.0"
+wasmparser = "=0.263.0"
+wit-parser = "=0.263.0"
+wit-component = "=0.263.0"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true

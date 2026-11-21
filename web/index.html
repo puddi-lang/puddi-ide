@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#131519">
+  <meta name="description" content="Write, check and run Puddi in your browser">
+  <title>Puddi IDE</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">p</span>
+      <h1>Puddi <span>IDE</span></h1>
+      <span class="version">v0.1.0</span>
+    </div>
+    <nav aria-label="Project links">
+      <a href="https://puddi-lang.github.io/puddi-docs/" target="_blank" rel="noopener">Docs</a>
+      <a class="github-link" href="https://github.com/puddi-lang/puddi-ide" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </header>
+
+  <main class="workbench">
+    <aside class="sidebar" id="sidebar" aria-label="Workspace and examples">
+      <div class="sidebar-header">
+        <h2>Workspace</h2>
+        <button id="open-file" class="icon-button" aria-label="Import Puddi files" title="Import Puddi files">
+          <span class="icon-import" aria-hidden="true"></span>
+        </button>
+        <button id="new-file" class="icon-button" aria-label="New file" title="New file">
+          <span class="icon-plus" aria-hidden="true"></span>
+        </button>
+      </div>
+      <input id="file-input" type="file" accept=".pud" multiple hidden>
+      <form id="new-file-form" hidden>
+        <label class="sr-only" for="file-name">File name</label>
+        <input id="file-name" type="text" placeholder="module.pud" maxlength="120" spellcheck="false" required>
+        <button type="submit">Add</button>
+        <p id="file-error" role="alert" hidden></p>
+      </form>
+      <ul class="files" id="files" aria-label="Workspace files"></ul>
+      <div class="sidebar-group">
+        <h2>Examples</h2>
+        <ul id="examples" class="example-list"></ul>
+      </div>
+      <div class="sidebar-footer">
+        <span class="local-dot" aria-hidden="true"></span>
+        <span id="save-status">Saved on this device</span>
+      </div>
+    </aside>
+
+    <div class="surface">
+      <div class="toolbar">
+        <div class="toolbar-context">
+          <button id="toggle-sidebar" class="icon-button" aria-label="Toggle workspace" aria-controls="sidebar"
+            aria-expanded="true" hidden><span aria-hidden="true" class="icon-menu"></span></button>
+          <span id="project-name">My workspace</span>
+        </div>
+        <div class="toolbar-actions">
+          <button class="tool-action" id="format" type="button" title="Format the current file">Format</button>
+          <button class="tool-action" id="check" type="button" title="Check types">Check</button>
+          <button class="primary" id="run" type="button"><span class="play-icon" aria-hidden="true"></span>Run</button>
+          <button class="tool-action stop" id="stop" type="button" hidden>Stop</button>
+        </div>
+      </div>
+      <div class="panes">
+        <section class="editor-pane" aria-label="Source editor">
+          <div class="pane-title">
+            <span class="file-badge" aria-hidden="true">P</span>
+            <span id="editor-file">main.pud</span>
+            <button class="icon-button pane-download" id="download-source" aria-label="Download source file"
+              title="Download source file"><span aria-hidden="true" class="icon-download"></span></button>
+          </div>
+          <div id="editor"></div>
+          <div class="editor-status">
+            <span id="cursor">Ln 1, Col 1</span>
+            <span>UTF-8</span>
+            <span>Puddi</span>
+          </div>
+        </section>
+
+        <section class="results-pane" aria-label="Program results">
+          <div class="panel-toolbar">
+            <div class="panel-tabs" role="tablist" aria-label="Result views">
+              <button type="button" id="tab-console" role="tab" aria-controls="console" aria-selected="true">Console</button>
+              <button type="button" id="tab-problems" role="tab" aria-controls="problems" aria-selected="false" tabindex="-1">
+                Problems <span id="problem-count" hidden>0</span>
+              </button>
+              <button type="button" id="tab-preview" role="tab" aria-controls="preview" aria-selected="false" tabindex="-1">Preview</button>
+            </div>
+            <button class="icon-button" id="clear" aria-label="Clear console" title="Clear console">
+              <span aria-hidden="true" class="icon-clear"></span>
+            </button>
+          </div>
+          <div id="console" class="result-panel console" role="tabpanel" aria-labelledby="tab-console" tabindex="0">
+            <div id="console-empty" class="empty-state">
+              <span class="terminal-icon" aria-hidden="true">&gt;_</span>
+              <p>Ready to run</p>
+              <span>Program output will appear here</span>
+            </div>
+            <div id="output" role="log" aria-live="polite"></div>
+          </div>
+          <div id="problems" class="result-panel problems" role="tabpanel" aria-labelledby="tab-problems" tabindex="0" hidden>
+            <div id="problems-empty" class="empty-state">
+              <span class="terminal-icon" aria-hidden="true">✓</span>
+              <p>No problems</p>
+            </div>
+            <ul id="diagnostics"></ul>
+          </div>
+          <div id="preview" class="result-panel preview" role="tabpanel" aria-labelledby="tab-preview" tabindex="0" hidden>
+            <div id="preview-empty" class="empty-state">
+              <span class="terminal-icon" aria-hidden="true">&lt;/&gt;</span>
+              <p>No preview yet</p>
+              <span>Run a program that imports std.dom</span>
+            </div>
+            <iframe id="preview-frame" title="Puddi program preview" sandbox="allow-scripts"
+              referrerpolicy="no-referrer" hidden></iframe>
+          </div>
+          <div class="result-status">
+            <span id="run-status" role="status">Browser target</span>
+            <button type="button" id="download-wasm" class="text-button" hidden>Download Wasm</button>
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <noscript>Enable JavaScript to use the Puddi IDE</noscript>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
