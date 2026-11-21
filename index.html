@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="./styles.css">
   <script>
     try {
-      const compiler = new Worker('./compiler-worker.9a436b8ae51bdee3.js', { type: 'module' });
+      const compiler = new Worker('./compiler-worker.3c4eda2b79b441d1.js', { type: 'module' });
       window.puddiWarmCompiler = compiler;
       compiler.addEventListener('error', () => {
         if (window.puddiWarmCompiler !== compiler) return;
@@ -139,6 +139,6 @@
   </main>
 
   <noscript>Enable JavaScript to use the Puddi IDE</noscript>
-  <script type="module" src="./app.f6c434e492d889f8.js"></script>
+  <script type="module" src="./app.f55fbf821b1c16c3.js"></script>
 </body>
 </html>
